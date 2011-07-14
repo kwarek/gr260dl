@@ -1,0 +1,5 @@
+To program sets serial port speed to 921600. Unfortunately
+speeds above 115200 aren't handled correctly by pl2303
+driver (as of 2.6.39). You need to apply included patch
+to the kernel to make it work (should be present in linux
+3.1).

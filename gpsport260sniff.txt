@@ -1,0 +1,60 @@
+init:
+send:						response:
+echo -ne "\$HOLUX241,1*6C\r\n" >/dev/ttyUSB0 
+echo -ne "\$PHLX810*35\r\n" >/dev/ttyUSB0	$PHLX852,GR260*3E
+echo -ne "\$PHLX826*30\r\n" >/dev/ttyUSB0	$PHLX859*38 - display USB icon
+echo -ne "\$PHLX827*31\r\n" >/dev/ttyUSB0	$PHLX860*32 - remove USB icon
+
+
+messages:
+send:			response:
+echo -ne"\str\r\n" >/dev/ttyUSB0
+$PHLX810*35		$PHLX852,GR260*3E
+$PHLX829*3F		$PHLX861,201*2C
+$PHLX826*30		$PHLX859*38 - display USB icon
+change speed to 921600
+$PHLX701*3A		$PHLX601,18*1E - track count
+$PHLX702,0,18*00	$PHLX900,702,3*33
+			$PHLX901,1152,FBFF1991*37
+$PHLX900,901,3*3E	$PHLX902,0,1152,FBFF1991*28
+$PHLX900,902,3*3D	some binary data (264B+165+...)
+ff + 62 + 243 + 31 + 298 + 75 + 244 + 28 + 170 = 1152
+$PHLX900,902,3*3D	nothing?
+$PHLX831*36		$PHLX863,GPSport260*74 #bye?
+
+
+wireshark filter: usb.data_len > 0
+#read tracklist
+#skipped begining
+change speed to 921600
+$PHLX701,*3A		$PHLX601,21*14
+$PHLX702,0,21*0A	$PHLX900,702,3*33
+			$PHLX901,1344,875960DD*33
+$PHLX900,901,3*3E	$PHLX902,0,1344,875960DD*2C
+$PHLX900,902,3*3D	some binary data (264B+165+...)
+ff + 60 + 264 + 9 + 268 + 8 + 278 + 98 + 159 + 19 + 180 = 1344
+64B na 1 sciezke
+$PHLX900,902,3*3D	nothing?
+$PHLX831*36		$PHLX863,GPSport260*74 #bye?
+
+
+#read track
+#skipped begining
+change speed to 921600
+$PHLX703,0,375*39	$PHLX900,703,3*32
+			$PHLX901,12000,5BCF5843*7F
+$PHLX900,901,3*3E	$PHLX902,0,2048,51B1A12F*56
+$PHLX900,902,3*3D	bin
+$PHLX900,902,3*3D	$PHLX902,2048,2048,5A3B024B*6A
+$PHLX900,902,3*3D	bin
+$PHLX900,902,3*3D	$PHLX902,4096,2048,2BC8DEB1*67
+$PHLX900,902,3*3D	bin
+$PHLX900,902,3*3D	$PHLX902,6144,2048,F4BC5854*6D
+$PHLX900,902,3*3D	bin
+$PHLX900,902,2*3C	$PHLX902,6144,2048,F4BC5854*6D
+$PHLX900,902,3*3D	bin
+$PHLX900,902,3*3D	bin 49+213+66+384+2
+$PHLX900,902,2*3C	nic
+$PHLX900,902,2*3C	nic
+$PHLX710*3A		$PHLX610,1983,7000,1680*1C
+$PHLX827*31		$PHLX860*32 - remove icon
