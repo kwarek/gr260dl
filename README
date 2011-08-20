@@ -1,5 +1,11 @@
+Communication was sniffed using wireshark's usb capture,
+with windows application running in virtualbox.
+
 To program sets serial port speed to 921600. Unfortunately
 speeds above 115200 aren't handled correctly by pl2303
 driver (as of 2.6.39). You need to apply included patch
-to the kernel to make it work (should be present in linux
-3.1).
+to the kernel to make it work (will be present in linux 3.1).
+
+Program doesn't (yet) check crc of received data blocks, so
+it's safer to download data twice, and check if they are
+identical.

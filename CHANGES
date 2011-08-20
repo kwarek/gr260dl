@@ -1,0 +1,5 @@
+r2: initial version
+r3: gpx dumped to file not stdout
+    changed arguments handling
+    fixed communication with old firmware version(?)
+    fixed losing bytes when block starts with \n
