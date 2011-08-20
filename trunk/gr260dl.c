@@ -8,9 +8,10 @@
 #include <unistd.h>
 #include <termios.h>
 #include <time.h>
+#include <assert.h>
 //#include <libusb-1.0/libusb.h>
 
-typedef struct {
+typedef struct { /* sizeof(trackinfo) == 64B */
 	uint32_t unk0;
 	char name[12];
 	uint32_t timestamp;
@@ -29,13 +30,27 @@ typedef struct {
 	uint32_t unk9;
 } trackinfo;
 
-typedef struct {
+typedef struct { /* sizeof(waypoint) == 32B */
 	uint32_t timestamp;
 	float lat;
 	float lon;
 	uint16_t alt; //in m
 	uint16_t speed; //in tenths of km/h
 
+/* { 6, 4, "HEADING" },
+   { 7, 2, "DSTA" },
+   { 8, 4, "DAGE" },
+   { 9, 2, "PDOP" },
+   { 10, 2, "HDOP"},
+   { 11, 2, "VDOP"},
+   { 12, 2, "NSAT (USED/VIEW)"},
+   { 13, 4, "SID",},
+   { 14, 2, "ELEVATION" },
+   { 15, 2, "AZIMUTH" },
+   { 16, 2, "SNR"},
+   { 17, 2, "RCR"},
+   { 18, 2, "MILLISECOND"},
+   { 19, 8, "DISTANCE" }, */
 	uint16_t unk1;
 	uint16_t unk2;
 	uint16_t unk3;
@@ -45,38 +60,52 @@ typedef struct {
 	uint32_t unk7;
 } waypoint;
 
+typedef enum {
+	CMD_UNKNOWN = -3,
+	CMD_QUIT = -2,
+	CMD_NONE = -1,
+	CMD_MODEL = 0,
+	CMD_FWARE,
+	CMD_START, //2
+	CMD_TRACKCNT,
+	CMD_TRACKS, //4 - better name
+	CMD_1STSIZE,
+	CMD_OFFSIZE, //6
+	CMD_BLOCK,
+	CMD_END = 8
+} cmd_t;
+
 struct tlist {
 	trackinfo ti;
 	unsigned num;
 	struct tlist* prev;
 };
 
-#define ts_offset 946684800
+#define ts_offset ((23*365+7*366)*24*3600)/*946684800*/ /* 1 Jan 2000 00:00 */
 
 static const char* cmds[] = { //	answers:
 	"PHLX810", //*35		$PHLX852,GR260*3E
-	"PHLX829", //*3F		$PHLX861,201*2C
+	"PHLX829", //*3F		$PHLX861,201*2C - firmware version
 	"PHLX826", //*30		$PHLX859*38 - disp. usb icon
-	//now important stuff
 	"PHLX701", //*3A		$PHLX601,18*1E - track count
 	"PHLX702,0,", //*00		$PHLX900,702,3*33
-		      //		$PHLX901,1152,FBFF1991*37
+		      //		$PHLX901,1152,FBFF1991*37 - 2nd line of response
 	"PHLX900,901,3", //*3E		$PHLX902,0,1152,FBFF1991*28
-	"PHLX900,902,3", //*3D		some binary data (264B+165+...)
-	//ff + 62 + 243 + 31 + 298 + 75 + 244 + 28 + 170 = 1152
-	"PHLX900,902,3",//*3D		nothing?
+	"PHLX900,902,3", //*3D		$PHLX902,30720,2048,AB690FC3*29
+	"PHLX900,902,3",//*3D		binary data (264B+165+...)
 //	"PHLX831",//*36			$PHLX863,GPSport260*74 #bye?
 	"PHLX827",
-	"PHLX703,0,",//		
+/*9*/	"PHLX703,0,",//		
+	"PHLX900,902,2", //*3C"		request retransmission of last packet
 	NULL
 };
 
 static const char* rets[] = {
 	"$PHLX852,GR260", //*3E
-	"$PHLX861,201*2C",
+	"$PHLX861,", //201*2C //firmware version
 	"$PHLX859*38",
 	"$PHLX601,", //18*1E //number of tracks
-	"$PHLX900,702,3*33",
+	"$PHLX900,702,", //3*33
 	"$PHLX901,",
 	"$PHLX902,",
 	"$PHLX900,703,3*32",
@@ -110,8 +139,8 @@ static void set_speed(const int fh, struct termios* const pterm,const speed_t sp
 	}
 }
 
-static void dumpGpxHeader(void) {
-	printf("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+static void dumpGpxHeader(FILE* f) {
+	fprintf(f,"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
 		"<gpx\n"
 		"  version=\"1.0\"\n"
 		"  creator=\"GPSBabel - http://www.gpsbabel.org\"\n"
@@ -120,8 +149,8 @@ static void dumpGpxHeader(void) {
 		"  xsi:schemaLocation=\"http://www.topografix.com/GPX/1/0 "
 			"http://www.topografix.com/GPX/1/0/gpx.xsd\">\n");
 }
-static void dumpTrackHeader(unsigned tracknum) {
-	printf("<trk>\n"
+static void dumpTrackHeader(FILE* f,unsigned tracknum) {
+	fprintf(f,"<trk>\n"
 		"  <name>track-%d</name>\n"
 		"<trkseg>\n",tracknum);
 	//<time>2011-06-28T20:27:31Z</time>
@@ -130,12 +159,13 @@ static void dumpTrackHeader(unsigned tracknum) {
 	// 
 }
 
-static void dumpTrackEnd(void) {
-		puts("</trkseg>\n</trk>");
+static void dumpTrackEnd(FILE* f) {
+	fprintf(f,"</trkseg>\n</trk>\n");
 }
 
-static void dumpWaypoints(const char rbuf[], const int len, const int gpxmode,
-			  int* const gpxheader, struct tlist* const tl) {
+static void dumpWaypoints(FILE* f,const char rbuf[], const int len,
+			  const int gpxmode, int* const gpxheader,
+			  struct tlist* const tl) {
 	static unsigned wpnum,tracknum;
 	struct tlist* itl;
 	int i;
@@ -154,11 +184,11 @@ static void dumpWaypoints(const char rbuf[], const int len, const int gpxmode,
 			       wp->unk3, wp->unk4, wp->unk5, wp->unk6, wp->unk7);
 		} else {
 			if (!*gpxheader) {
-				dumpGpxHeader();
+				dumpGpxHeader(f);
 				*gpxheader = 1;
 				wpnum = 0;
 				tracknum = 1;
-				dumpTrackHeader(tracknum);
+				dumpTrackHeader(f,tracknum);
 			}
 			for (itl = tl; itl; itl = itl->prev) {
 				if (itl->ti.start_addr+itl->ti.size <= wpnum) {
@@ -166,73 +196,102 @@ static void dumpWaypoints(const char rbuf[], const int len, const int gpxmode,
 				}
 			}
 			if (itl && itl->num != tracknum) {
-				dumpTrackEnd();
+				dumpTrackEnd(f);
 				tracknum++;
-				dumpTrackHeader(tracknum);
+				dumpTrackHeader(f,tracknum);
 			}
 			strftime(tbuf,sizeof(tbuf),"%FT%TZ",ptm);
-			printf("<trkpt lat=\"%.7f\" lon=\"%.7f\">\n"
-			       "  <ele>%d</ele>\n"
-			       "  <time>%s</time>\n"
-			       "  <speed>%d</speed>\n"
-			       "</trkpt>\n",wp->lat,wp->lon,wp->alt,tbuf,wp->speed);
+			fprintf(f,"<trkpt lat=\"%.7f\" lon=\"%.7f\">\n"
+				"  <ele>%d</ele>\n"
+				"  <time>%s</time>\n"
+				"  <speed>%d</speed>\n"
+				"</trkpt>\n",wp->lat,wp->lon,wp->alt,tbuf,wp->speed);
 			wpnum ++;
 		}
 	}
 }
 
-int main(int argc, char* argv[]) {
+int main(const int argc, char* argv[]) {
 	fd_set fds;
-	char rbuf[4*512+64]; //2KB is max anyway
+	FILE *gpxf = NULL;
+	char rbuf[4*512+512]; //2KB is max anyway
+	const char* tracksbin = NULL;
 	struct termios nterm,oterm;
-	struct timeval tv,*ptv = NULL;
+	struct timeval tv;
 	struct tlist *tracklist = NULL;
-	int i,fh,fht = -1,rv,ridx = 0,nextcmd = 0, trackcnt=0, trackcurr = 1, readtrack = -1;
-	int quit = 0, recvd = 0, hexmode = 0, hispeed = 0, gpxmode = 0, gpxheader = 0, listonly = 0;
+	int i, fh = -1, fht = -1, rv, ridx = 0, nextcmd = CMD_MODEL, trackcnt=0, trackcurr = 1;
+	int recvd = 0, hexmode = 0, hispeed = 0, gpxmode = 0, gpxheader = 0, listonly = 0;
+	int opt, expbytes = -1, readtrack = -1;
 //	libusb_device_handle *handle = NULL;
 	void setQuit(int __attribute__((unused)) sno) {
-		quit = 1;
+		nextcmd = CMD_QUIT;
 	}
 
 	if (argc < 2) {
-		fprintf(stderr,"%s <device>\n",argv[0]);
-		return -1;
+		goto printhelp;
 	}
 	close(0);
-	signal(SIGINT,setQuit);
-	FD_ZERO(&fds);
-	fh = open(argv[1],O_RDWR|O_NOCTTY|O_NONBLOCK);
-	if (fh < 0) {
-		perror(argv[1]);
-		return -1;
-	}
-	for (i = 1; i < argc; i++) {
-		if (!strcmp(argv[i],"-t")) {
-			readtrack = strtol(argv[i]+2,NULL,0);
-		}
-		if (!strcmp(argv[i],"-b")) {
-			const char fn[] = "tracklist.bin";
+	while ((opt = getopt(argc,argv,"i:t:b:g:"/*c:d*/"lh")) != -1) {
+		switch (opt) {
+		case 'i':
+			fh = open(optarg,O_RDWR|O_NOCTTY|O_NONBLOCK);
+			if (fh < 0) {
+				perror(optarg);
+				return -1;
+			}
+			break;
+		case 't':/* reads from 0 to given address */
+			readtrack = strtol(optarg,NULL,0);
+			break;
+		case 'b':{
+			char fn[1024] = "tracklist_";
+			strncat(fn,optarg,sizeof(fn));
 			fht = open(fn,O_WRONLY|O_CREAT,0644);
 			if (fht < 0) {
 				perror(fn);
 			}
-		}
-		if (!strcmp(argv[i],"-g")) {
+			tracksbin = optarg;
+			};break;
+		case 'g':
 			gpxmode = 1;
-		}
-		if (!strcmp(argv[i],"-l")) {
+			gpxf = fopen(optarg,"w");
+			if (!gpxf) {
+				perror(optarg);
+			}
+			break;
+		case 'v':
+			//verbose
+			break;
+		case 'd':
+			//debug flag
+			break;
+		case 'c':
+			//dump communication
+			break;
+		case 'l':
 			listonly = 1;
+			break;
+		case 'h':
+printhelp:
+			printf("%s -i</dev/ttyUSB?> -t<track_offset> -b<memdump.bin> -g<file.gpx> -l -h\n",argv[0]);
+			return 0;
 		}
 	}
+	if (fh < 0) {
+		abort();
+	}
+	signal(SIGINT,setQuit);
 	tcgetattr(fh,&oterm);
 	nterm = oterm;
 	cfmakeraw(&nterm);
 	set_speed(fh,&nterm,B38400);
 
-	while (!quit) {
+	FD_ZERO(&fds);
+	while (nextcmd != CMD_QUIT) {
+		//static unsigned off = 0, readb = 0;//FIX
 		if (nextcmd >= 0 && !recvd) {
 			char cmdbuf[32];
-			if (nextcmd == 4) {
+			if (nextcmd == CMD_TRACKS) {
 				sprintf(cmdbuf,"%s%d",cmds[nextcmd],trackcnt);
 			} else if (nextcmd == 9) {
 				sprintf(cmdbuf,"%s%d",cmds[nextcmd],readtrack);				
@@ -243,83 +302,100 @@ int main(int argc, char* argv[]) {
 			hexmode = 0;
 			//nextcmd = -1;//recvd = 0;
 		}
-		ptv = &tv;
 		FD_SET(fh,&fds);
-		if (nextcmd == 6) {
+		if (nextcmd == CMD_OFFSIZE || nextcmd == CMD_BLOCK) {
 			/* shorter timeout */
 			tv.tv_sec = 0;
-			tv.tv_usec = 20*1000;
+			tv.tv_usec = 20*1000; //50
 		} else {
 			tv.tv_sec = 2;
 			tv.tv_usec = 0;
 		}
-		rv = select(fh+1,&fds,NULL,NULL,ptv);
-//		printf("select: rv:%d recvd:%d nextcmd:%d ptv:%p\n",rv,recvd,nextcmd,ptv);
+		rv = select(fh+1,&fds,NULL,NULL,&tv);
+//		printf("select: rv:%d recvd:%d nextcmd:%d ptv:%p\n",rv,recvd,nextcmd,&tv);
 		if (rv > 0 && FD_ISSET(fh,&fds)) {
-			unsigned char c;
-
+//			printf("\nread: %d, hexmode:%d recvd:%d",ridx,hexmode,recvd);
 			recvd = 1;
-			//read(fh,&c,1);
-			//rbuf[ridx++] = c;
 			i = read(fh,rbuf+ridx,sizeof(rbuf)-ridx);
-//			printf("\nread: %d, hexmode:%d ",i,hexmode);
-			if (i > 0)
-				ridx += i;
-			int ir = 0;
-			for (ir = 0; ir < i; ir++) {
-				c = rbuf[ridx-i+ir];
-			if (c > 32 && c < 127 && !hexmode) {
+			/*if (off >= 421888) {
+				int k;
+				fprintf(stderr,"%06u+%03u[%2u]:",off,ridx,i);
+				for (k = 0; k < i; k++) {
+					if ((rbuf+ridx)[k] > 32 && (rbuf+ridx)[k] < 127)
+					fprintf(stderr,"  %c",(rbuf+ridx)[k]);
+					else
+					fprintf(stderr," %2hhX",(rbuf+ridx)[k]);
+				}
+				fprintf(stderr,"\n");
+			}*/
+			if (i < 0) {
+				perror("read");
+				//goto retry
+			}
+			assert(i >= 0);
+			ridx += i;
+			int j, ir = 0;
+			for (ir = ridx-i; ir < ridx; ir++) {
+				unsigned char c = rbuf[ir];
+			if (c >= 32 && c < 127 && !hexmode) {
 				fputc(c,stderr);
 			} else if (c == '\r' && !hexmode) {
 				fprintf(stderr,"\\r");
 			} else if (c == '\n' && !hexmode) {
-				rbuf[ridx] = 0;
-				//printf("ridx:%d rbuf:%s hexmode:%d\n",ridx,rbuf,hexmode);
-				if (!my_strcmp(rbuf,rets[0])) {
-					recvd = 0;
-					nextcmd = 1;
-				} else if (!my_strcmp(rbuf,rets[1])) {
-					recvd = 0;
-					nextcmd = 2;
-				} else if (!my_strcmp(rbuf,rets[2])) {
-
-					recvd = 0;
+				for (j = ir; j >= 0; j--) {
+					if (rbuf[j] == '$')
+						break;
+				}
+				if (j < 0) {
+					goto skip;
+				}
+				//- not necessary rbuf[ridx] = 0;
+			//	if (j != 0 && j != 2048)
+				//if (nextcmd != 6)
+				//fprintf(stderr,"ridx:%d rbuf:%.*s hexmode:%d i:%d ir:%d j:%d\n",
+				//	ridx,(ir-j)-2,rbuf+j,hexmode,i,ir,j);
+			//	fprintf(stderr,"ridx:%d rbuf:%c,%c i:%d ir:%d j:%d\n",
+			//		ridx,rbuf[0],rbuf[1],i,ir,j);
+				recvd = 0;
+				if (!my_strcmp(rbuf,rets[CMD_MODEL])) {
+					printf("GR260 found.\n");
+					nextcmd = CMD_FWARE;
+				} else if (!my_strcmp(rbuf,rets[CMD_FWARE])) {
+					unsigned fwver = atoi(rbuf+strlen(rets[CMD_FWARE]));
+					printf("Firmware version: %u.%02u\n",fwver/100,fwver%100);
+					nextcmd = CMD_START;
+				} else if (!my_strcmp(rbuf,rets[CMD_START])) {
 					if (!hispeed) {
-						//usleep(1000);
 						set_speed(fh,&nterm,B921600);
-						//usleep(10*1000);
 						hispeed = 1;
 					}
 					if (readtrack >=0) {
 						nextcmd = 9;
 					} else {
-						nextcmd = 3;
+						nextcmd = CMD_TRACKCNT;
 					}
-				} else if (!my_strcmp(rbuf,rets[3])) {
-					sscanf(rbuf+strlen(rets[3]),"%d",&trackcnt);
-					recvd = 0;
+				} else if (!my_strcmp(rbuf,rets[CMD_TRACKCNT])) {
+					sscanf(rbuf+strlen(rets[CMD_TRACKCNT]),"%d",&trackcnt);
 					nextcmd = 4;
-				} else if (!my_strcmp(rbuf,rets[7])) {
-				} else if (!my_strcmp(rbuf,"$PHLX900,702,")) { // rets[4]
-					//ridx = 0;
-//					recvd = 0;
+					//printf("trackcnt %d\n",trackcnt);
+				} else if (!my_strcmp(rbuf,rets[4])) {
+					recvd = 1;
 //					nextcmd = -1;
 				} else if (!my_strcmp(rbuf,"$PHLX863,GPSport260")) {
-					recvd = 0;
-					nextcmd = -1;
+					nextcmd = CMD_NONE;
 				} else if (!my_strcmp(rbuf,rets[5])) {
-					recvd = 0;
 					nextcmd = 5; //6
-//					tv.tv_sec = 2;
-//					tv.tv_usec = 0;
-//					ptv = &tv;
-				} else if (!my_strcmp(rbuf,rets[6])) {
+				//} else if (!my_strcmp(rbuf,rets[7])) {
+				//	printf ("RETS7 %s\n",rets[7]);
+				//	recvd = 1;
+				} else if (!my_strcmp(rbuf+j,rets[6])) {
 					/* TODO: verify CRC */
-					recvd = 0;
+					int offset;
+					/*int srv =*/ sscanf(rbuf+j+strlen(rets[6]),"%d,%d,%*X*%*d",&offset,&expbytes);
+					//printf("expbytes:%d  srv:%d\n",expbytes,srv);
 					nextcmd = 6;
 					hexmode = 1; //test
 				} else {
-					recvd = 0;
 					//nextcmd = -1;
 				}
 				ridx = 0;
@@ -330,13 +406,23 @@ int main(int argc, char* argv[]) {
 				tv.tv_usec = 0;
 				hexmode = 1;
 			}
-			}
+skip:;
+			} //for
 		} else if (!rv) { /* timeout */
+			static unsigned off = 0;
 			//printf(" recvd:%d ridx:%d trackinfo:%d\n",recvd,ridx,sizeof(trackinfo));
 			if (recvd) {
 				fputc('\n',stderr);
 				if (fht >= 0) {
-					write(fht,rbuf,ridx);
+					if (ridx != expbytes) {
+				//+		fprintf(stderr,"FAILED! %d!=%d\n",ridx,expbytes);
+						nextcmd = 10;
+						recvd = 0;
+					ridx = 0;
+					} else {
+				//+		fprintf(stderr,"write(%d,%p,%d), off:%u expb:%d\n",fht,rbuf,ridx,off,expbytes);
+						off += write(fht,rbuf,ridx);
+					}
 				}
 				if (readtrack < 0) {
 					for (i = 0; i < ridx; i+= sizeof(trackinfo)) {
@@ -354,7 +440,7 @@ int main(int argc, char* argv[]) {
 					char tbuf[64];
 
 					strftime(tbuf,sizeof(tbuf),"%T",ptm);
-					fprintf(stderr,"%2d: %08X %10s %s %5ds %5dm %4X@%06X"
+					fprintf(stderr,"%2d: %08X %10s %s %5ds %6dm %4X@%06X"
 						" %05d %05d %05d %05d %08X %08X %03X %03X %u\n",
 						trackcurr-1, ti->unk0,
 						ti->name[0] != '\377'?ti->name:"(none)",
@@ -363,46 +449,47 @@ int main(int argc, char* argv[]) {
 						ti->unk5, ti->unk6, ti->unk7, ti->unk8, ti->unk9);
 					}
 				} else {
-					dumpWaypoints(rbuf,ridx,gpxmode,&gpxheader,tracklist);
+					dumpWaypoints(gpxf,rbuf,ridx,gpxmode,&gpxheader,tracklist);
 				}
-				nextcmd = 6;
+				if (nextcmd != 10)
+					nextcmd = 6;
+				//ridx = 0; //++
 			} else if (nextcmd ==6) {
 				if (readtrack <= 0 && tracklist && !listonly) {
 					/* TODO: test: what will happend if we try read beyond the end of data? */
 					readtrack = tracklist->ti.start_addr+tracklist->ti.size;
 					nextcmd = 9;
 					if (fht >= 0) {
-						const char fn[] = "tracks.bin";
 						close(fht);
-						fht = open(fn,O_WRONLY|O_CREAT,0644);
+						fht = open(tracksbin,O_WRONLY|O_CREAT,0644);
+						off = 0;
 						if (fht < 0) {
-							perror(fn);
+							perror(tracksbin);
 						}
 					}
 
 				} else {
-					quit = 1;
+					nextcmd = CMD_QUIT;
 				}
 			}
 			recvd = 0;
 //			set_speed(fh,&nterm,B38400);
 			//nextcmd = 6;
-			//ptv = NULL;
 		}
 	}
 	if (!hispeed) {
 		set_speed(fh,&nterm,B921600);
 	}
-	//write(fh,"$PHLX831*36\r\n",13);
-	write(fh,"$PHLX827*31\r\n",13);
+	send_cmd(fh,cmds[CMD_END]); //write(fh,"$PHLX831*36\r\n",13);
 	tcsetattr(fh,TCSANOW,&oterm);
 	close(fh);
 	if (fht >= 0) {
 		close(fht);
 	}
 	if (gpxmode && gpxheader) {
-		dumpTrackEnd();
-		puts("</gpx>");
+		dumpTrackEnd(gpxf);
+		fprintf(gpxf,"</gpx>\n");
+		fclose(gpxf);
 	}
 	fputs("\nbye!",stderr);
 	return 0;
