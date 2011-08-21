@@ -3,3 +3,5 @@ r3: gpx dumped to file not stdout
     changed arguments handling
     fixed communication with old firmware version(?)
     fixed losing bytes when block starts with \n
+r4: faster download
+    internal changes
