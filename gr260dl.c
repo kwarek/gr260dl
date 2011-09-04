@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <sys/select.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -10,6 +11,8 @@
 #include <termios.h>
 #include <time.h>
 //#include <libusb-1.0/libusb.h>
+
+#define COMMPRINTF(...) if (gCommDump) fprintf(gCommDump,__VA_ARGS__)
 
 typedef struct { /* sizeof(trackinfo) == 64B */
 	uint32_t unk0;
@@ -34,29 +37,25 @@ typedef struct { /* sizeof(waypoint) == 32B */
 	uint32_t timestamp;
 	float lat;
 	float lon;
-	uint16_t alt; //in m
-	uint16_t speed; //in tenths of km/h
-
-/* { 6, 4, "HEADING" },
-   { 7, 2, "DSTA" },
+	uint16_t alt; /* altitude in m */
+	uint16_t speed; /* in tenths of km/h */
+/* { 7, 2, "DSTA" },
    { 8, 4, "DAGE" },
    { 9, 2, "PDOP" },
    { 10, 2, "HDOP"},
    { 11, 2, "VDOP"},
    { 12, 2, "NSAT (USED/VIEW)"},
    { 13, 4, "SID",},
-   { 14, 2, "ELEVATION" },
    { 15, 2, "AZIMUTH" },
    { 16, 2, "SNR"},
    { 17, 2, "RCR"},
-   { 18, 2, "MILLISECOND"},
-   { 19, 8, "DISTANCE" }, */
-	uint16_t unk1;
+   { 18, 2, "MILLISECOND"}, */
+	uint16_t unk1  :12;
+	uint8_t is_poi :4;
 	uint16_t unk2;
-	uint16_t unk3;
-	uint16_t unk4;
-	uint16_t unk5;
-	uint16_t unk6;
+	uint16_t unk3; /* barimetric altitude in m? */
+	uint16_t heading; /* heding azimuth in degrees */
+	uint32_t dist; /* distance travelled in m */
 	uint32_t unk7;
 } waypoint;
 
@@ -81,6 +80,11 @@ struct tlist {
 	trackinfo ti;
 	unsigned num;
 	struct tlist* prev;
+};
+
+struct plist {
+	waypoint poi;
+	struct plist* prev;
 };
 
 #define ts_offset ((23*365+7*366)*24*3600)/*946684800*/ /* 1 Jan 2000 00:00 */
@@ -114,6 +118,9 @@ static const char* rets[] = {
 	NULL
 };
 
+static int gVerbose = 1;
+static FILE* gCommDump = NULL;
+
 static int send_message(const int fh, const char cmd[]) {
 	char buf[32];
 	unsigned i;
@@ -125,7 +132,7 @@ static int send_message(const int fh, const char cmd[]) {
 	}
 	i = sprintf(buf,"$%s*%02hhX\r\n",cmd,xors);
 	rv = write(fh,buf,i);
-	fprintf(stderr,"$%s*%02hhX -> ",cmd,xors);
+	COMMPRINTF("$%s*%02hhX -> ",cmd,xors);
 	return rv;
 }
 
@@ -185,6 +192,33 @@ static void dumpTrackEnd(FILE* f) {
 	fprintf(f,"</trkseg>\n</trk>\n");
 }
 
+static void dumpPOIs(FILE* f,struct plist* poilist) {
+	char tbuf[64];
+	struct plist* tmp;
+	unsigned wpnum = 0;
+
+	for (tmp = poilist; tmp; tmp = tmp->prev)
+		wpnum++;
+	while (poilist) {
+		waypoint* poi = &(poilist->poi);
+		time_t t = poi->timestamp + ts_offset;
+		struct tm* ptm = gmtime(&t);
+
+		strftime(tbuf,sizeof(tbuf),"%FT%TZ",ptm);
+		fprintf(f,"<wpt lat=\"%.7f\" lon=\"%.7f\">\n"
+			"  <ele>%d</ele>\n"
+			"  <time>%s</time>\n"
+			"  <name>WP%06d</name>\n"
+			"</wpt>\n",
+			poi->lat,poi->lon,poi->alt,tbuf,wpnum);
+
+		wpnum--;
+		tmp = poilist->prev;
+		free(poilist);
+		poilist = tmp;
+	}
+}
+
 static void trackListPrepend(const char rbuf[], const int ridx,
 				    struct tlist** const tl) {
 	static int trackcurr = 1;
@@ -220,7 +254,7 @@ static void dumpTracks(const struct tlist* from,
 		struct tm* ptm = gmtime(&t);
 
 		strftime(tbuf,sizeof(tbuf),"%T",ptm);
-		fprintf(stderr,"%2d: %08X %10s %s %5ds %6dm %4X@%06X"
+		printf("%2d: %08X %10s %s %5ds %6dm %4X@%06X"
 			" %05d %05d %05d %05d %08X %08X %03X %03X %u\n",
 			tl->num, ti->unk0,
 			ti->name[0] != '\377'?ti->name:"(none)",
@@ -233,7 +267,7 @@ static void dumpTracks(const struct tlist* from,
 
 static void dumpWaypoints(FILE* f,const char rbuf[], const int len,
 			  const int gpxmode, int* const gpxheader,
-			  struct tlist* const tl) {
+			  struct tlist* const tl, struct plist** const pl) {
 	static unsigned wpnum,tracknum;
 	struct tlist* itl;
 	int i;
@@ -243,13 +277,19 @@ static void dumpWaypoints(FILE* f,const char rbuf[], const int len,
 		time_t t = wp->timestamp + ts_offset;
 		struct tm* ptm = gmtime(&t);
 		char tbuf[64];
-
+					      
+		if (wp->is_poi) {
+			struct plist *newpoi = malloc(sizeof(struct plist));
+			newpoi->prev = *pl;
+			newpoi->poi = *wp;
+			(*pl) = newpoi;
+		}
 		if (!gpxmode) {
 			strftime(tbuf,sizeof(tbuf),"%F_%T",ptm);
-			printf("%2d: %s %8.6f %8.6f %3d %2d  %5d %5d %5d %5d %5d %5d %u\n",
+			printf("%2d: %s %8.6f %8.6f %3d %2d %4d %1d %5d %5d %5d %5d %u\n",
 			       i/sizeof(waypoint)+1, tbuf, wp->lat, wp->lon,
-			       wp->alt, (wp->speed+5)/10, wp->unk1, wp->unk2,
-			       wp->unk3, wp->unk4, wp->unk5, wp->unk6, wp->unk7);
+			       wp->alt, (wp->speed+5)/10, wp->unk1, wp->is_poi, wp->unk2,
+			       wp->unk3, wp->heading, wp->dist, wp->unk7);
 		} else {
 			if (!*gpxheader) {
 				dumpGpxHeader(f);
@@ -272,8 +312,9 @@ static void dumpWaypoints(FILE* f,const char rbuf[], const int len,
 			fprintf(f,"<trkpt lat=\"%.7f\" lon=\"%.7f\">\n"
 				"  <ele>%d</ele>\n"
 				"  <time>%s</time>\n"
+				"  <course>%d</course>\n"
 				"  <speed>%d</speed>\n"
-				"</trkpt>\n",wp->lat,wp->lon,wp->alt,tbuf,wp->speed);
+				"</trkpt>\n",wp->lat,wp->lon,wp->alt,tbuf,wp->heading,wp->speed);
 			wpnum ++;
 		}
 	}
@@ -283,15 +324,17 @@ int main(const int argc, char* argv[]) {
 	fd_set fds;
 	FILE *gpxf = NULL;
 	char rbuf[4*512+512]; //2KB is max anyway
-	const char* tracksbin = NULL;
 	struct termios nterm,oterm;
 	struct timeval tv;
 	struct tlist *tracklist = NULL;
+	struct plist* poilist = NULL;
 	cmd_t nextcmd = CMD_MODEL;
 	int i, rv, hin = -1, hdump = -1, ridx = 0, trackcnt=0, gpxmode = 0, gpxheader = 0;
 	int recvd = 0, hexmode = 0;
-	int opt, expbytes = -1, endaddr = -1, tlistsize = 0, hispeed = 0, listonly = 0;
-//	libusb_device_handle *handle = NULL;
+	int opt, expbytes = -1, endaddr = -1, totalsize = 0, hispeed = 0, listonly = 0;
+	unsigned totalchksum = 0;
+	static unsigned off = 0;
+
 	void setQuit(int __attribute__((unused)) sno) {
 		nextcmd = CMD_QUIT;
 	}
@@ -299,7 +342,7 @@ int main(const int argc, char* argv[]) {
 	if (argc < 2) {
 		goto printhelp;
 	}
-	while ((opt = getopt(argc,argv,"i:t:b:g:"/*c:d*/"lh")) != -1) {
+	while ((opt = getopt(argc,argv,"i:t:b:g:c:dvqlh")) != -1) {
 		switch (opt) {
 		case 'i':
 			hin = open(optarg,O_RDWR|O_NOCTTY|O_NONBLOCK);
@@ -312,13 +355,10 @@ int main(const int argc, char* argv[]) {
 			endaddr = strtol(optarg,NULL,0);
 			break;
 		case 'b':{
-			char fn[1024] = "tracklist_";
-			strncat(fn,optarg,sizeof(fn));
-			hdump = open(fn,O_WRONLY|O_CREAT,0644);
+			hdump = open(optarg,O_WRONLY|O_CREAT,0644);
 			if (hdump < 0) {
-				perror(fn);
+				perror(optarg);
 			}
-			tracksbin = optarg;
 			};break;
 		case 'g':
 			gpxmode = 1;
@@ -331,20 +371,31 @@ int main(const int argc, char* argv[]) {
 			//quiet
 			break;
 		case 'v':
-			//verbose
+			gVerbose = 2;
 			break;
 		case 'd':
 			//debug flag
 			break;
 		case 'c':
-			//dump communication
+			gCommDump = fopen(optarg,"w");
+			if (!gCommDump) {
+				perror(optarg);
+			}
 			break;
 		case 'l':
 			listonly = 1;
 			break;
 		case 'h':
 printhelp:
-			printf("%s -i</dev/ttyUSB?> -t<end_address> -b<memdump.bin> -g<file.gpx> -l -h\n",argv[0]);
+			printf("%s\n"
+			       "\t-i</dev/ttyUSB?>\n"
+			       "\t-t<end_address>\n"
+			       "\t-b<memdump.bin>\n"
+			       "\t-g<file.gpx>\n"
+			       "\t-c<communication_log>\n"
+			       "\t-v be verbose\n"
+			       "\t-l list tracks only\n"
+			       "\t-h show this help\n",argv[0]);
 			return 0;
 		}
 	}
@@ -398,9 +449,9 @@ printhelp:
 			for (ir = ridx-i; ir < ridx; ir++) {
 				unsigned char c = rbuf[ir];
 			if (c >= 32 && c < 127 && !hexmode) {
-				fputc(c,stderr);
+				COMMPRINTF("%c",c);
 			} else if (c == '\r' && !hexmode) {
-				fprintf(stderr,"\\r");
+				COMMPRINTF("\\r");
 			} else if (c == '\n' && !hexmode) {
 				for (j = ir; j >= 0; j--) {
 					if (rbuf[j] == '$')
@@ -411,11 +462,11 @@ printhelp:
 				}
 				recvd = 0;
 				if (!my_strcmp(rbuf,rets[CMD_MODEL])) {
-					printf("GR260 found.\n");
+					fprintf(stderr,"GR260 found.\n");
 					nextcmd = CMD_FWARE;
 				} else if (!my_strcmp(rbuf,rets[CMD_FWARE])) {
 					unsigned fwver = atoi(rbuf+strlen(rets[CMD_FWARE]));
-					printf("Firmware version: %u.%02u\n",fwver/100,fwver%100);
+					fprintf(stderr,"Firmware version: %u.%02u\n",fwver/100,fwver%100);
 					nextcmd = CMD_START;
 				} else if (!my_strcmp(rbuf,rets[CMD_START])) {
 					if (!hispeed) {
@@ -438,8 +489,12 @@ printhelp:
 					nextcmd = CMD_NONE;
 				} else if (!my_strcmp(rbuf,rets[5])) {
 					nextcmd = CMD_1STSIZE; //6
-					sscanf(rbuf+strlen(rets[5]),"%d,%*X*%*d",&tlistsize);
-					//printf("Tracklist size:%d\n",tlistsize);
+					sscanf(rbuf+strlen(rets[5]),"%d,%X*%*d",&totalsize,&totalchksum);
+					off = 0;
+					if (hdump >= 0) {
+						write(hdump,&totalsize,sizeof(totalsize));
+						write(hdump,&totalchksum,sizeof(totalchksum));
+					}
 				//} else if (!my_strcmp(rbuf,rets[7])) {
 				//	printf ("RETS7 %s\n",rets[7]);
 				//	recvd = 1;
@@ -454,7 +509,7 @@ printhelp:
 					//nextcmd = -1;
 				}
 				ridx = 0;
-				fputc(c,stderr);
+				COMMPRINTF("%c",c);
 			} else {
 			//	printf(" 0x%02hhX",c); fflush(stdout);
 				tv.tv_sec = 2;
@@ -464,28 +519,28 @@ printhelp:
 skip:;
 			} //for
 		} else if (!rv) { /* timeout */
-			static unsigned off = 0;
 			if (recvd) {
 dumpdata:
-				fputc('\n',stderr);
+				COMMPRINTF("\n");
 				if (hdump >= 0) {
 					if (ridx != expbytes) {
-				//+		fprintf(stderr,"FAILED! %d!=%d\n",ridx,expbytes);
+						COMMPRINTF("FAILED! %d!=%d\n",ridx,expbytes);
 						nextcmd = CMD_RETRY;
 						ridx = 0;
 					} else {
-						//fprintf(stderr,"write(%d,%p,%d), off:%u expb:%d\n",hdump,rbuf,ridx,off,expbytes);
+						//COMMPRINTF("write(%d,%p,%d), off:%u expb:%d\n",hdump,rbuf,ridx,off,expbytes);
 						off += write(hdump,rbuf,ridx);
-						printf("\r%7d/%d",off,tlistsize);
-						fflush(stdout);
+						fprintf(stderr,"\r%7d/%d",off,totalsize);
 					}
 				}
 				if (endaddr < 0) {
 					const struct tlist *from = tracklist;
 					trackListPrepend(rbuf,ridx,&tracklist);
-					dumpTracks(from,tracklist);
+					if (gVerbose > 1) {
+						dumpTracks(from,tracklist);
+					}
 				} else {
-					dumpWaypoints(gpxf,rbuf,ridx,gpxmode,&gpxheader,tracklist);
+					dumpWaypoints(gpxf,rbuf,ridx,gpxmode,&gpxheader,tracklist,&poilist);
 				}
 				if (nextcmd != CMD_RETRY)
 					nextcmd = CMD_OFFSIZE;
@@ -496,14 +551,6 @@ dumpdata:
 					/* TODO: test: what will happend if we try read beyond the end of data? */
 					endaddr = tracklist->ti.start_addr+tracklist->ti.size;
 					nextcmd = CMD_REQTDATA;
-					if (hdump >= 0) {
-						close(hdump);
-						hdump = open(tracksbin,O_WRONLY|O_CREAT,0644);
-						off = 0;
-						if (hdump < 0) {
-							perror(tracksbin);
-						}
-					}
 
 				} else {
 					nextcmd = CMD_QUIT;
@@ -520,16 +567,21 @@ dumpdata:
 	if (hdump >= 0) {
 		close(hdump);
 	}
+	if (gCommDump) {
+		fclose(gCommDump);
+	}
 	if (gpxmode && gpxheader) {
 		dumpTrackEnd(gpxf);
+		dumpPOIs(gpxf,poilist);
 		fprintf(gpxf,"</gpx>\n");
 		fclose(gpxf);
 	}
-	fputs("\nbye!",stderr);
+	fprintf(stderr,"\nbye!");
 	return 0;
 }
 
 /*	//code for using usb directly
+	libusb_device_handle *handle = NULL;
 	libusb_init(NULL);	
 	handle = libusb_open_device_with_vid_pid(NULL,0x67B,0x2303);
 	if (handle) {

@@ -5,3 +5,14 @@ r3: gpx dumped to file not stdout
     fixed losing bytes when block starts with \n
 r4: faster download
     internal changes
+r5:
+    included module source instead of patch
+    communication logging can be disabled (-g)
+    dump binary data to one file
+r6:
+    POIs
+    dump communication only if requested (-c)
+    tracklist goes to stdout
+    heading in waypoint
+    verbose flag
+    included kernel module source instead of patch
