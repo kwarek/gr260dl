@@ -37,7 +37,7 @@ typedef struct { /* sizeof(waypoint) == 32B */
 	uint32_t timestamp;
 	float lat;
 	float lon;
-	uint16_t alt; /* altitude in m */
+	uint16_t altgps; /* altitude in m */
 	uint16_t speed; /* in tenths of km/h */
 /* { 7, 2, "DSTA" },
    { 8, 4, "DAGE" },
@@ -52,8 +52,8 @@ typedef struct { /* sizeof(waypoint) == 32B */
    { 18, 2, "MILLISECOND"}, */
 	uint16_t unk1  :12;
 	uint8_t is_poi :4;
-	uint16_t unk2;
-	uint16_t unk3; /* barimetric altitude in m? */
+	uint16_t hbr;    /* heartbeat rate */
+	uint16_t altbar; /* barimetric altitude in m */
 	uint16_t heading; /* heding azimuth in degrees */
 	uint32_t dist; /* distance travelled in m */
 	uint32_t unk7;
@@ -210,7 +210,7 @@ static void dumpPOIs(FILE* f,struct plist* poilist) {
 			"  <time>%s</time>\n"
 			"  <name>WP%06d</name>\n"
 			"</wpt>\n",
-			poi->lat,poi->lon,poi->alt,tbuf,wpnum);
+			poi->lat,poi->lon,poi->altgps,tbuf,wpnum);
 
 		wpnum--;
 		tmp = poilist->prev;
@@ -267,7 +267,8 @@ static void dumpTracks(const struct tlist* from,
 
 static void dumpWaypoints(FILE* f,const char rbuf[], const int len,
 			  const int gpxmode, int* const gpxheader,
-			  struct tlist* const tl, struct plist** const pl) {
+			  struct tlist* const tl, struct plist** const pl,
+			  const int usealtbar) {
 	static unsigned wpnum,tracknum;
 	struct tlist* itl;
 	int i;
@@ -288,8 +289,8 @@ static void dumpWaypoints(FILE* f,const char rbuf[], const int len,
 			strftime(tbuf,sizeof(tbuf),"%F_%T",ptm);
 			printf("%2d: %s %8.6f %8.6f %3d %2d %4d %1d %5d %5d %5d %5d %u\n",
 			       i/sizeof(waypoint)+1, tbuf, wp->lat, wp->lon,
-			       wp->alt, (wp->speed+5)/10, wp->unk1, wp->is_poi, wp->unk2,
-			       wp->unk3, wp->heading, wp->dist, wp->unk7);
+			       wp->altgps, (wp->speed+5)/10, wp->unk1, wp->is_poi, wp->hbr,
+			       wp->altbar, wp->heading, wp->dist, wp->unk7);
 		} else {
 			if (!*gpxheader) {
 				dumpGpxHeader(f);
@@ -313,8 +314,17 @@ static void dumpWaypoints(FILE* f,const char rbuf[], const int len,
 				"  <ele>%d</ele>\n"
 				"  <time>%s</time>\n"
 				"  <course>%d</course>\n"
-				"  <speed>%d</speed>\n"
-				"</trkpt>\n",wp->lat,wp->lon,wp->alt,tbuf,wp->heading,wp->speed);
+				"  <speed>%d</speed>\n",
+				wp->lat,wp->lon,usealtbar ? wp->altbar : wp->altgps,
+				tbuf,wp->heading,wp->speed);
+			if (wp->hbr) {
+				fprintf(f,"  <extensions>\n"
+					"    <gpxtpx:TrackPointExtension>\n"
+					"    <gpxtpx:hr>%d</gpxtpx:hr>\n"
+					"    </gpxtpx:TrackPointExtension>\n"
+					"  </extensions>\n",wp->hbr);
+			}
+			fprintf(f,"</trkpt>\n");
 			wpnum ++;
 		}
 	}
@@ -330,7 +340,7 @@ int main(const int argc, char* argv[]) {
 	struct plist* poilist = NULL;
 	cmd_t nextcmd = CMD_MODEL;
 	int i, rv, hin = -1, hdump = -1, ridx = 0, trackcnt=0, gpxmode = 0, gpxheader = 0;
-	int recvd = 0, hexmode = 0;
+	int recvd = 0, hexmode = 0, usealtbar = 0;
 	int opt, expbytes = -1, endaddr = -1, totalsize = 0, hispeed = 0, listonly = 0;
 	unsigned totalchksum = 0;
 	static unsigned off = 0;
@@ -342,7 +352,7 @@ int main(const int argc, char* argv[]) {
 	if (argc < 2) {
 		goto printhelp;
 	}
-	while ((opt = getopt(argc,argv,"i:t:b:g:c:dvqlh")) != -1) {
+	while ((opt = getopt(argc,argv,"i:t:b:g:c:dvqlah")) != -1) {
 		switch (opt) {
 		case 'i':
 			hin = open(optarg,O_RDWR|O_NOCTTY|O_NONBLOCK);
@@ -384,6 +394,10 @@ int main(const int argc, char* argv[]) {
 			break;
 		case 'l':
 			listonly = 1;
+			gVerbose = 2; /* we probably want to see the list */
+			break;
+		case 'a':
+			usealtbar = 1;
 			break;
 		case 'h':
 printhelp:
@@ -540,7 +554,7 @@ dumpdata:
 						dumpTracks(from,tracklist);
 					}
 				} else {
-					dumpWaypoints(gpxf,rbuf,ridx,gpxmode,&gpxheader,tracklist,&poilist);
+					dumpWaypoints(gpxf,rbuf,ridx,gpxmode,&gpxheader,tracklist,&poilist,usealtbar);
 				}
 				if (nextcmd != CMD_RETRY)
 					nextcmd = CMD_OFFSIZE;
