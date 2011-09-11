@@ -13,3 +13,6 @@ r5: communication logging can be disabled (-g)
     heading in waypoint
     verbose flag
     included kernel module source instead of patch
+r6: fixed CHANGES file
+r7: added heartrate to gpx
+    option for using barimetric altitude instead of gps's (-a)
