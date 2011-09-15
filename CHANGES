@@ -16,3 +16,6 @@ r5: communication logging can be disabled (-g)
 r6: fixed CHANGES file
 r7: added heartrate to gpx
     option for using barimetric altitude instead of gps's (-a)
+r8: added reading binary files (written with -b) (-f)
+    fixed speed in gpx (m/s instead of km/h)
+    better help

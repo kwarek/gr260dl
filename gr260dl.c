@@ -13,6 +13,7 @@
 //#include <libusb-1.0/libusb.h>
 
 #define COMMPRINTF(...) if (gCommDump) fprintf(gCommDump,__VA_ARGS__)
+#define MIN(a,b) ((a)<(b) ? (a) : (b))
 
 typedef struct { /* sizeof(trackinfo) == 64B */
 	uint32_t unk0;
@@ -50,7 +51,8 @@ typedef struct { /* sizeof(waypoint) == 32B */
    { 16, 2, "SNR"},
    { 17, 2, "RCR"},
    { 18, 2, "MILLISECOND"}, */
-	uint16_t unk1  :12;
+	uint8_t unk1;
+	uint8_t unk2 :4;
 	uint8_t is_poi :4;
 	uint16_t hbr;    /* heartbeat rate */
 	uint16_t altbar; /* barimetric altitude in m */
@@ -287,9 +289,9 @@ static void dumpWaypoints(FILE* f,const char rbuf[], const int len,
 		}
 		if (!gpxmode) {
 			strftime(tbuf,sizeof(tbuf),"%F_%T",ptm);
-			printf("%2d: %s %8.6f %8.6f %3d %2d %4d %1d %5d %5d %5d %5d %u\n",
+			printf("%2d: %s %8.6f %8.6f %3d %2d %3u %2u %1d %5d %5d %5d %5d %u\n",
 			       i/sizeof(waypoint)+1, tbuf, wp->lat, wp->lon,
-			       wp->altgps, (wp->speed+5)/10, wp->unk1, wp->is_poi, wp->hbr,
+			       wp->altgps, (wp->speed+5)/10, wp->unk1, wp->unk2, wp->is_poi, wp->hbr,
 			       wp->altbar, wp->heading, wp->dist, wp->unk7);
 		} else {
 			if (!*gpxheader) {
@@ -314,9 +316,9 @@ static void dumpWaypoints(FILE* f,const char rbuf[], const int len,
 				"  <ele>%d</ele>\n"
 				"  <time>%s</time>\n"
 				"  <course>%d</course>\n"
-				"  <speed>%d</speed>\n",
+				"  <speed>%.6f</speed>\n",
 				wp->lat,wp->lon,usealtbar ? wp->altbar : wp->altgps,
-				tbuf,wp->heading,wp->speed);
+				tbuf,wp->heading,wp->speed/36.);
 			if (wp->hbr) {
 				fprintf(f,"  <extensions>\n"
 					"    <gpxtpx:TrackPointExtension>\n"
@@ -352,7 +354,7 @@ int main(const int argc, char* argv[]) {
 	if (argc < 2) {
 		goto printhelp;
 	}
-	while ((opt = getopt(argc,argv,"i:t:b:g:c:dvqlah")) != -1) {
+	while ((opt = getopt(argc,argv,"i:f:t:b:g:c:dvqlah")) != -1) {
 		switch (opt) {
 		case 'i':
 			hin = open(optarg,O_RDWR|O_NOCTTY|O_NONBLOCK);
@@ -360,6 +362,15 @@ int main(const int argc, char* argv[]) {
 				perror(optarg);
 				return -1;
 			}
+			break;
+		case 'f':
+			hin = open(optarg,O_RDWR|O_NOCTTY|O_NONBLOCK);
+			if (hin < 0) {
+				perror(optarg);
+				return -1;
+			}
+			read(hin,&totalsize,4);
+			read(hin,&totalchksum,4);
 			break;
 		case 't':/* reads from 0 to given address */
 			endaddr = strtol(optarg,NULL,0);
@@ -402,20 +413,49 @@ int main(const int argc, char* argv[]) {
 		case 'h':
 printhelp:
 			printf("%s\n"
-			       "\t-i</dev/ttyUSB?>\n"
-			       "\t-t<end_address>\n"
-			       "\t-b<memdump.bin>\n"
-			       "\t-g<file.gpx>\n"
-			       "\t-c<communication_log>\n"
-			       "\t-v be verbose\n"
-			       "\t-l list tracks only\n"
-			       "\t-h show this help\n",argv[0]);
+			       "\t-i</dev/ttyUSB?> read from device\n"
+			       "\t-f<memdump.bin>  read from file\n"
+			       "\t-t<end_address>  retrieve part of log\n"
+			       "\t-b<memdump.bin>  write to file\n"
+			       "\t-g<file.gpx>     dump in gpx format\n"
+			       "\t-c<comm_log.txt> dump communication\n"
+			       "\t-v               be verbose (show tracklist)\n"
+			       "\t-l               list tracks only\n"
+			       "\t-a               use barimetric altitude\n"
+			       "\t-h               show this help\n",argv[0]);
 			return 0;
 		}
 	}
 	close(0);
 	if (hin < 0) {
 		abort();
+	}
+	if (totalsize > 0) { /* read from file */
+		while (totalsize > 0) {
+			const struct tlist *from = tracklist;
+			ridx = read(hin,rbuf,MIN(sizeof(rbuf),(unsigned)totalsize));
+			if (ridx < 0) {
+				perror("read");
+				break;
+			}
+			trackListPrepend(rbuf,ridx,&tracklist);
+			totalsize -= ridx;
+			if (gVerbose > 1) {
+				dumpTracks(from,tracklist);
+			}
+		}
+		read(hin,&totalsize,4);
+		read(hin,&totalchksum,4);
+		while (totalsize > 0) {
+			ridx = read(hin,rbuf,MIN(sizeof(rbuf),(unsigned)totalsize));
+			if (ridx < 0) {
+				perror("read");
+				break;
+			}
+			dumpWaypoints(gpxf,rbuf,ridx,gpxmode,&gpxheader,tracklist,&poilist,usealtbar);
+			totalsize -= ridx;
+		}
+		goto end;
 	}
 	signal(SIGINT,setQuit);
 	tcgetattr(hin,&oterm);
@@ -577,6 +617,7 @@ dumpdata:
 	}
 	send_cmd(hin,CMD_END);
 	tcsetattr(hin,TCSANOW,&oterm);
+end:
 	close(hin);
 	if (hdump >= 0) {
 		close(hdump);
