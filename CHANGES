@@ -19,3 +19,4 @@ r7: added heartrate to gpx
 r8: added reading binary files (written with -b) (-f)
     fixed speed in gpx (m/s instead of km/h)
     better help
+r9: added script splitgpx.pl
