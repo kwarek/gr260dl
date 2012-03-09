@@ -302,7 +302,7 @@ static void dumpWaypoints(FILE* f,const char rbuf[], const int len,
 				dumpTrackHeader(f,tracknum);
 			}
 			for (itl = tl; itl; itl = itl->prev) {
-				if (itl->ti.start_addr+itl->ti.size <= wpnum) {
+				if (itl->ti.start_addr <= wpnum) {
 					break;
 				}
 			}
@@ -631,7 +631,7 @@ end:
 		fprintf(gpxf,"</gpx>\n");
 		fclose(gpxf);
 	}
-	fprintf(stderr,"\nbye!");
+	fprintf(stderr,"\nbye!\n");
 	return 0;
 }
 
